@@ -284,7 +284,7 @@ for step in range(num_iterations + 1):
         group["momentum"] = muon_momentum
     for opt in optimizers:
         opt.step()
-    model.zero_grad(set_to_none=True)
+    # model.zero_grad(set_to_none=True)
     synchronize()
     t1 = time.time()
     dt = t1 - t0
