@@ -47,7 +47,7 @@ def apply_rotary_emb(x, cos, sin):
     out = torch.cat([y1, y2], 3) # re-assemble
     out = out.to(x.dtype) # ensure input/output dtypes match
     return out
-
+# NEP Why is it selfattention?
 class CausalSelfAttention(nn.Module):
     def __init__(self, config, layer_idx):
         super().__init__()
@@ -59,9 +59,12 @@ class CausalSelfAttention(nn.Module):
         assert self.n_embd % self.n_head == 0
         assert self.n_kv_head <= self.n_head and self.n_head % self.n_kv_head == 0
         self.c_q = nn.Linear(self.n_embd, self.n_head * self.head_dim, bias=False)
+        # NEP Why do we need no bias of the whole thing?
         self.c_k = nn.Linear(self.n_embd, self.n_kv_head * self.head_dim, bias=False)
         self.c_v = nn.Linear(self.n_embd, self.n_kv_head * self.head_dim, bias=False)
+        # NEPNOTE the kv is diff from q here.
         self.c_proj = nn.Linear(self.n_embd, self.n_embd, bias=False)
+        # what is a c_proj? the scheme that transforms this back to residual stream?
 
     def forward(self, x, cos_sin, kv_cache):
         B, T, C = x.size()
@@ -70,6 +73,7 @@ class CausalSelfAttention(nn.Module):
         q = self.c_q(x).view(B, T, self.n_head, self.head_dim)
         k = self.c_k(x).view(B, T, self.n_kv_head, self.head_dim)
         v = self.c_v(x).view(B, T, self.n_kv_head, self.head_dim)
+        # NEP it seems .view only creates a view,  but it has independent memory such that new qkv go by such matrices?
 
         # Apply Rotary Embeddings to queries and keys to get relative positional encoding
         cos, sin = cos_sin
@@ -78,13 +82,17 @@ class CausalSelfAttention(nn.Module):
         q, k, v = q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2) # make head be batch dim, i.e. (B, T, H, D) -> (B, H, T, D)
 
         # Apply KV cache: insert current k,v into cache, get the full view so far
+
+        # NEP I still don't get the idea of kv_cache I guess, because i didn't see it's necessary. When you apply qk matmul, each pair only gets counted once, no?
         if kv_cache is not None:
             k, v = kv_cache.insert_kv(self.layer_idx, k, v)
         Tq = q.size(2) # number of queries in this forward pass
         Tk = k.size(2) # number of keys/values in total (in the cache + current forward pass)
 
         # Attention: queries attend to keys/values autoregressively. A few cases to handle:
+        # NEP Don't feel I am confortable with the word "autoregressively"
         enable_gqa = self.n_head != self.n_kv_head # Group Query Attention (GQA): duplicate key/value heads to match query heads if desired
+        # NEP As far as I could recall GQA is about many more queries than we have key/value heads for such that they could share. It seems the implementation is then we need to match their numbers. 
         if kv_cache is None or Tq == Tk:
             # During training (no KV cache), attend as usual with causal attention
             # And even if there is KV cache, we can still use this simple version when Tq == Tk
@@ -93,6 +101,7 @@ class CausalSelfAttention(nn.Module):
             # During inference but with a single query in this forward pass:
             # The query has to attend to all the keys/values in the cache
             y = F.scaled_dot_product_attention(q, k, v, is_causal=False, enable_gqa=enable_gqa)
+            # NEP what is causal here?
         else:
             # During inference AND we have a chunk of queries in this forward pass:
             # First, each query attends to all the cached keys/values (i.e. full prefix)
@@ -137,19 +146,22 @@ class Block(nn.Module):
 
 class GPT(nn.Module):
     def __init__(self, config):
-        super().__init__()
+        super().__init__()  # NEPQ so all attributes and methods with nn.Module?
         self.config = config
+        # NEP it seems to me self.transformer is an embedding  + a block. NEPQ do we need an entirely new embedding for a diff block then?
         self.transformer = nn.ModuleDict({
             "wte": nn.Embedding(config.vocab_size, config.n_embd),
             "h": nn.ModuleList([Block(config, layer_idx) for layer_idx in range(config.n_layer)]),
         })
+        # NEP I don't understand what this is. Maybe I'll ignore it in my implementation for now.
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
         # To support meta device initialization, we init the rotary embeddings here, but it's fake
         # As for rotary_seq_len, these rotary embeddings are pretty small/cheap in memory,
         # so let's just over-compute them, but assert fail if we ever reach that amount.
         # In the future we can dynamically grow the cache, for now it's fine.
         self.rotary_seq_len = config.sequence_len * 10 # 10X over-compute should be enough, TODO make nicer?
-        head_dim = config.n_embd // config.n_head
+        # NEP I only learned that rotary is an embedding scheme to calculate the angle between q and k. Don't know why then it as seq_len (not that of Q & K's? let along 10x)
+        head_dim = config.n_embd // config.n_head  # NEP oh yes!
         cos, sin = self._precompute_rotary_embeddings(self.rotary_seq_len, head_dim)
         self.register_buffer("cos", cos, persistent=False) # persistent=False means it's not saved to the checkpoint
         self.register_buffer("sin", sin, persistent=False)
@@ -201,8 +213,9 @@ class GPT(nn.Module):
 
     def get_device(self):
         return self.transformer.wte.weight.device
+    # NEP so it seems by default everybody is on divice of whatever transformer weights'
 
-    def estimate_flops(self):
+    def estimate_flops(self):  # NEP why do we estimate flops? 
         """ Return the estimated FLOPs per token for the model. Ref: https://arxiv.org/abs/2204.02311 """
         nparams = sum(p.numel() for p in self.parameters())
         nparams_embedding = self.transformer.wte.weight.numel()
@@ -211,6 +224,7 @@ class GPT(nn.Module):
         return num_flops_per_token
 
     def setup_optimizers(self, unembedding_lr=0.004, embedding_lr=0.2, matrix_lr=0.02, weight_decay=0.0):
+        """"""
         model_dim = self.config.n_embd
         ddp, rank, local_rank, world_size = get_dist_info()
         # Separate out all parameters into 3 groups (matrix, embedding, lm_head)
