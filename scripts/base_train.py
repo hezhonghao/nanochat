@@ -270,10 +270,21 @@ for step in range(num_iterations + 1):
         train_loss = loss.detach() # for logging
         loss = loss / grad_accum_steps # each .backward() is a grad sum => normalize loss here
         loss.backward()
+        if micro_step == grad_accum_steps-1:
+            for name, param in orig_model.named_parameters():
+                if param.grad is not None and name == "transformer.h.3.mlp.c_proj.weight" or name == "transformer.h.0.attn.c_q.weight":
+                    print(f"Step {step}, micro_step {micro_step}, {name}: grad_norm = {param.grad.norm().item():.6f}")
+
         x, y = next(train_loader) # prefetch the next batch while the GPU is busy with forward/backward
     # gradient clipping (TODO possibly expertiment with)
     if grad_clip > 0.0:
         torch.nn.utils.clip_grad_norm_(orig_model.parameters(), grad_clip)
+        total_norm = torch.sqrt(sum(p.grad.norm()**2 for p in orig_model.parameters() if p.grad is not None))
+        print(f'After clipping, total norm is {total_norm}')
+    
+    for name, param in orig_model.named_parameters():
+        if param.grad is not None and name == name == "transformer.h.3.mlp.c_proj.weight":
+            print(f"After Grad Clipping. Step {step}, micro_step {micro_step}, {name}: grad_norm = {param.grad.norm().item():.6f}")
     # step the optimizers
     lrm = get_lr_multiplier(step)
     for opt in optimizers:
@@ -284,7 +295,7 @@ for step in range(num_iterations + 1):
         group["momentum"] = muon_momentum
     for opt in optimizers:
         opt.step()
-    # model.zero_grad(set_to_none=True)
+    model.zero_grad(set_to_none=True)  # BUG: commented out for debugging exercise
     synchronize()
     t1 = time.time()
     dt = t1 - t0
