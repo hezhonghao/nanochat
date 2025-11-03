@@ -32,6 +32,7 @@ print_banner()
 # -----------------------------------------------------------------------------
 # User settings
 run = "dummy" # wandb run name default ("dummy" is special - we won't log to wandb)
+run = "lrm_nochange_num_iter20"  # just for wandb to log.
 # Runtime
 device_type = "" # cuda|cpu|mps (empty => autodetect good device type default, in order: CUDA > MPS > CPU)
 # Model architecture
@@ -69,7 +70,7 @@ user_config = {k: globals()[k] for k in config_keys} # will be useful for loggin
 # Compute init
 device_type = autodetect_device_type() if device_type == "" else device_type
 ddp, ddp_rank, ddp_local_rank, ddp_world_size, device = compute_init(device_type)
-master_process = ddp_rank == 0 # this process will do logging, checkpointing etc.
+master_process = ddp_rank == 0 # this process will do logging, checkpointing etc. # NEP In multi-GPU training (DDP - Distributed Data Parallel), you have multiple processes running. Only one process (the "master") should log to wandb to avoid duplicate logs
 autocast_ctx = torch.amp.autocast(device_type=device_type, dtype=torch.bfloat16) if device_type == "cuda" else nullcontext()
 synchronize = torch.cuda.synchronize if device_type == "cuda" else lambda: None
 get_max_memory = torch.cuda.max_memory_allocated if device_type == "cuda" else lambda: 0
@@ -261,13 +262,13 @@ for step in range(num_iterations + 1):
 
     # -------------------------------------------------------------------------
     # single training step
-    # evaluate the gradient
+    # calculate the gradient
     synchronize()
     t0 = time.time()
     for micro_step in range(grad_accum_steps):
         with autocast_ctx:
             loss = model(x, y)
-        train_loss = loss.detach() # for logging
+        train_loss = loss.detach() # for logging # NEP accoridng to comment this seems to be what is logged, before it's divided.
         loss = loss / grad_accum_steps # each .backward() is a grad sum => normalize loss here
         loss.backward()
         if micro_step == grad_accum_steps-1:
@@ -288,14 +289,17 @@ for step in range(num_iterations + 1):
     # step the optimizers
     lrm = get_lr_multiplier(step)
     for opt in optimizers:
-        for group in opt.param_groups:
-            group["lr"] = group["initial_lr"] * lrm
+        for idx, group in enumerate(opt.param_groups):
+            group["lr"] = group["initial_lr"] #* lrm 
+
+    actual_lr = optimizers[0].param_groups[0]['lr']
+    print(f"At step {step}, lrm is {lrm:.4f}; actual learning rate {actual_lr:.4f} (first param group)")
     muon_momentum = get_muon_momentum(step)
     for group in muon_optimizer.param_groups:
         group["momentum"] = muon_momentum
     for opt in optimizers:
         opt.step()
-    model.zero_grad(set_to_none=True)  # BUG: commented out for debugging exercise
+    model.zero_grad(set_to_none=True)
     synchronize()
     t1 = time.time()
     dt = t1 - t0
@@ -303,7 +307,7 @@ for step in range(num_iterations + 1):
 
     # logging
     smooth_train_loss = ema_beta * smooth_train_loss + (1 - ema_beta) * train_loss.item() # EMA the training loss
-    debiased_smooth_loss = smooth_train_loss / (1 - ema_beta**(step + 1)) # debias the EMA
+    debiased_smooth_loss = smooth_train_loss / (1 - ema_beta**(step + 1)) # debias the EMA # EMA last step artificially suppressed loss terms at the beginning.
     pct_done = 100 * step / num_iterations
     tok_per_sec = int(world_tokens_per_fwdbwd / dt)
     flops_per_sec = num_flops_per_token * total_batch_size / dt
@@ -312,17 +316,18 @@ for step in range(num_iterations + 1):
     if step > 10:
         total_training_time += dt # only count the time after the first 10 steps
     print0(f"step {step:05d}/{num_iterations:05d} ({pct_done:.2f}%) | loss: {debiased_smooth_loss:.6f} | lrm: {lrm:.2f} | dt: {dt * 1000:.2f}ms | tok/sec: {tok_per_sec:,} | mfu: {mfu:.2f} | total time: {total_training_time/60:.2f}m")
-    if step % 100 == 0:
-        wandb_run.log({
-            "step": step,
-            "total_training_flops": flops_so_far,
-            "total_training_time": total_training_time,
-            "train/loss": debiased_smooth_loss,
-            "train/lrm": lrm,
-            "train/dt": dt,
-            "train/tok_per_sec": tok_per_sec,
-            "train/mfu": mfu,
-        })
+    #if step % 10 == 0:
+    wandb_run.log({
+        "step": step,
+        "total_training_flops": flops_so_far,
+        "total_training_time": total_training_time,
+        "train/loss": debiased_smooth_loss,
+        "train/lrm": lrm,
+        "train/actual_lr_1st_group": actual_lr,
+        "train/dt": dt,
+        "train/tok_per_sec": tok_per_sec,
+        "train/mfu": mfu,
+    })
 
 # print a few more stats
 print0(f"Peak memory usage: {get_max_memory() / 1024 / 1024:.2f}MiB")
@@ -357,4 +362,6 @@ get_report().log(section="Base model training", data=[
 
 # cleanup
 wandb_run.finish() # wandb run finish
+if not use_dummy_wandb and master_process:
+    print0(f'View run at {wandb_run.get_url()}')
 compute_cleanup()
