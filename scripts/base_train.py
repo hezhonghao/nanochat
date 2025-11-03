@@ -32,7 +32,7 @@ print_banner()
 # -----------------------------------------------------------------------------
 # User settings
 run = "dummy" # wandb run name default ("dummy" is special - we won't log to wandb)
-run = "lrm_nochange_num_iter20"  # just for wandb to log.
+run = "lrm_num_iter20_grad_plots"  # just for wandb to log.
 # Runtime
 device_type = "" # cuda|cpu|mps (empty => autodetect good device type default, in order: CUDA > MPS > CPU)
 # Model architecture
@@ -278,19 +278,25 @@ for step in range(num_iterations + 1):
 
         x, y = next(train_loader) # prefetch the next batch while the GPU is busy with forward/backward
     # gradient clipping (TODO possibly expertiment with)
+    bef_clip_total_norm = torch.sqrt(sum(p.grad.norm()**2 for p in orig_model.parameters() if p.grad is not None))
     if grad_clip > 0.0:
         torch.nn.utils.clip_grad_norm_(orig_model.parameters(), grad_clip)
         total_norm = torch.sqrt(sum(p.grad.norm()**2 for p in orig_model.parameters() if p.grad is not None))
         print(f'After clipping, total norm is {total_norm}')
     
     for name, param in orig_model.named_parameters():
-        if param.grad is not None and name == name == "transformer.h.3.mlp.c_proj.weight":
+        if param.grad is not None and name == "transformer.h.3.mlp.c_proj.weight":
             print(f"After Grad Clipping. Step {step}, micro_step {micro_step}, {name}: grad_norm = {param.grad.norm().item():.6f}")
+
+    param_q_g_norm = orig_model.get_parameter("transformer.h.0.attn.c_q.weight").grad.norm().item()
+    param_fc_g_norm = orig_model.get_parameter("transformer.h.3.mlp.c_proj.weight").grad.norm().item()
+    print(f"After Grad Clipping. Step {step}, micro_step {micro_step}, \n transformer.h.0.attn.c_q.weight: grad_norm = {param_q_g_norm:.6f} \ntransformer.h.3.mlp.c_proj.weight: grad_norm = {param_fc_g_norm:.6f}")
+
     # step the optimizers
     lrm = get_lr_multiplier(step)
     for opt in optimizers:
         for idx, group in enumerate(opt.param_groups):
-            group["lr"] = group["initial_lr"] #* lrm 
+            group["lr"] = group["initial_lr"] * lrm 
 
     actual_lr = optimizers[0].param_groups[0]['lr']
     print(f"At step {step}, lrm is {lrm:.4f}; actual learning rate {actual_lr:.4f} (first param group)")
@@ -324,6 +330,8 @@ for step in range(num_iterations + 1):
         "train/loss": debiased_smooth_loss,
         "train/lrm": lrm,
         "train/actual_lr_1st_group": actual_lr,
+        "train/gradient/begin_q": param_q_g_norm,
+        "train/gradient/end_fc": param_fc_g_norm,
         "train/dt": dt,
         "train/tok_per_sec": tok_per_sec,
         "train/mfu": mfu,
