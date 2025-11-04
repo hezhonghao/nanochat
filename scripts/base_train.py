@@ -188,8 +188,9 @@ for step in range(num_iterations + 1):
         model.eval()
         val_loader = build_val_loader()
         eval_steps = eval_tokens // (device_batch_size * max_seq_len * ddp_world_size)
-        with autocast_ctx:
-            val_bpb = evaluate_bpb(model, val_loader, eval_steps, token_bytes)
+        with torch.no_grad():
+            with autocast_ctx:
+                val_bpb = evaluate_bpb(model, val_loader, eval_steps, token_bytes)
         print0(f"Step {step:05d} | Validation bpb: {val_bpb:.4f}")
         if val_bpb < min_val_bpb:
             min_val_bpb = val_bpb
@@ -206,8 +207,9 @@ for step in range(num_iterations + 1):
     results = {}
     if core_metric_every > 0 and (last_step or (step > 0 and step % core_metric_every == 0)):
         model.eval()
-        with autocast_ctx:
-            results = evaluate_model(orig_model, tokenizer, device, max_per_task=core_metric_max_per_task)
+        with torch.no_grad():
+            with autocast_ctx:
+                results = evaluate_model(orig_model, tokenizer, device, max_per_task=core_metric_max_per_task)
         print0(f"Step {step:05d} | CORE metric: {results['core_metric']:.4f}")
         wandb_run.log({
             "step": step,
@@ -270,6 +272,7 @@ for step in range(num_iterations + 1):
             loss = model(x, y)
         train_loss = loss.detach() # for logging # NEP accoridng to comment this seems to be what is logged, before it's divided.
         loss = loss / grad_accum_steps # each .backward() is a grad sum => normalize loss here
+        
         loss.backward()
         if micro_step == grad_accum_steps-1:
             for name, param in orig_model.named_parameters():
@@ -283,7 +286,8 @@ for step in range(num_iterations + 1):
         torch.nn.utils.clip_grad_norm_(orig_model.parameters(), grad_clip)
         total_norm = torch.sqrt(sum(p.grad.norm()**2 for p in orig_model.parameters() if p.grad is not None))
         print(f'After clipping, total norm is {total_norm}')
-    
+    else:
+        total_norm = bef_clip_total_norm
     for name, param in orig_model.named_parameters():
         if param.grad is not None and name == "transformer.h.3.mlp.c_proj.weight":
             print(f"After Grad Clipping. Step {step}, micro_step {micro_step}, {name}: grad_norm = {param.grad.norm().item():.6f}")
@@ -296,7 +300,7 @@ for step in range(num_iterations + 1):
     lrm = get_lr_multiplier(step)
     for opt in optimizers:
         for idx, group in enumerate(opt.param_groups):
-            group["lr"] = group["initial_lr"] * lrm 
+            group["lr"] = group["initial_lr"] * lrm
 
     actual_lr = optimizers[0].param_groups[0]['lr']
     print(f"At step {step}, lrm is {lrm:.4f}; actual learning rate {actual_lr:.4f} (first param group)")
@@ -330,8 +334,10 @@ for step in range(num_iterations + 1):
         "train/loss": debiased_smooth_loss,
         "train/lrm": lrm,
         "train/actual_lr_1st_group": actual_lr,
-        "train/gradient/begin_q": param_q_g_norm,
-        "train/gradient/end_fc": param_fc_g_norm,
+        "train/gradient_begin_q": param_q_g_norm,
+        "train/gradient_end_fc": param_fc_g_norm,
+        "train/gradient_total_norm": total_norm,
+        "train/gradient_total_norm_before_clipping": bef_clip_total_norm,
         "train/dt": dt,
         "train/tok_per_sec": tok_per_sec,
         "train/mfu": mfu,

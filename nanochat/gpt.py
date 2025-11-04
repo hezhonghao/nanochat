@@ -86,7 +86,7 @@ class CausalSelfAttention(nn.Module):
         # NEP I still don't get the idea of kv_cache I guess, because i didn't see it's necessary. When you apply qk matmul, each pair only gets counted once, no?
         if kv_cache is not None:
             k, v = kv_cache.insert_kv(self.layer_idx, k, v)
-        Tq = q.size(2) # number of queries in this forward pass
+        Tq = q.size(2) # number of queries in this forward pass  # NEP seq_len 
         Tk = k.size(2) # number of keys/values in total (in the cache + current forward pass)
 
         # Attention: queries attend to keys/values autoregressively. A few cases to handle:
@@ -106,11 +106,11 @@ class CausalSelfAttention(nn.Module):
             # During inference AND we have a chunk of queries in this forward pass:
             # First, each query attends to all the cached keys/values (i.e. full prefix)
             attn_mask = torch.zeros((Tq, Tk), dtype=torch.bool, device=q.device) # True = keep, False = mask
-            prefix_len = Tk - Tq
+            prefix_len = Tk - Tq  # NEP I thought q > k, but I might be wrong.
             if prefix_len > 0: # can't be negative but could be zero
-                attn_mask[:, :prefix_len] = True
+                attn_mask[:, :prefix_len] = True  # seq,seq square 
             # Then, causal attention within this chunk
-            attn_mask[:, prefix_len:] = torch.tril(torch.ones((Tq, Tq), dtype=torch.bool, device=q.device))
+            attn_mask[:, prefix_len:] = torch.tril(torch.ones((Tq, Tq), dtype=torch.bool, device=q.device), diagonal=0)
             y = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask, enable_gqa=enable_gqa)
 
         # Re-assemble the heads side by side and project back to residual stream
