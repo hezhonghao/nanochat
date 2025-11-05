@@ -453,7 +453,7 @@ The above timing is a **baseline for medium difficulty bugs**. Adjust based on:
 
 | Format | Hint Strategy |
 |--------|---------------|
-| **Type 1 (Code Review)** | Minimal hints - code is already visible. If stuck >8 min on easy bug or >15 min on hard bug, give directional hint about which lines to focus on. |
+| **Type 1 (Code Review)** | Minimal hints - code is already visible. If stuck >8 min on easy bug or >15 min on hard bug, make small suggestions|
 | **Type 2 (Production Debugging)** | Hints can help with methodology: "What would you check next?" or "Have you narrowed down to a component?" |
 
 ---
